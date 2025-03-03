@@ -1,0 +1,1136 @@
+---
+title: "Final Project"
+author: "Arvin Castelo, Semal Shastri"
+date: "`r Sys.Date()`"
+output: 
+  bookdown::pdf_document2:
+    keep_tex: true
+header-includes:
+  - \usepackage{longtable}  # Allows for better PDF table rendering
+  - \usepackage{graphicx}
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r message=FALSE, warning=FALSE, include=FALSE}
+library(tidyverse)
+library(lmtest)
+library(broom)
+library(faraway)
+library(MASS)
+library(glmnet)
+library(flextable)
+library(gt)
+```
+
+```{r include=FALSE}
+# Set global defaults for flextables
+set_flextable_defaults(
+  font.color = "black",
+  font.size = 11,
+  border.color = "gray",
+  fonts_ignore = TRUE # Ignore custom font settings
+)
+```
+
+------------------------------------------------------------------------
+
+# Introduction
+
+To explain which predictors are useful in determining exam scores.
+
+------------------------------------------------------------------------
+
+# Data Pre-processing
+
+## Data Cleaning
+
+We observed entries with missing values in the dataset. These entries will be removed.
+
+```{r include=FALSE}
+data <- read.csv("StudentPerformanceFactors.csv", header = TRUE)
+```
+
+```{r}
+data <- data |>
+  filter(Teacher_Quality != "",
+         Distance_from_Home != "",
+         Parental_Education_Level != "")
+```
+
+There are no duplicate entries in the document. The resulting dataset will be sampled for this study.
+
+## Data Splitting
+
+We used a separate train and test sets coming from this data. We used seed number $456$ for this analysis.
+
+```{r include=FALSE}
+# We will only use 500 data points for this project
+set.seed(456)
+train_idx <- sample(nrow(data), 500)
+trainData <- data[train_idx, ]
+
+data2 <- data[-train_idx, ]
+test_idx <- sample(nrow(data2), 500)
+testData <- data[test_idx, ]
+```
+
+------------------------------------------------------------------------
+
+# Summary Statistics and Data Visualization
+
+## Numerical Variables
+
+Scatterplots provide a good visualization of the relationships between the numerical predictors and the response variable.
+
+```{r echo=FALSE}
+# Visualize the numerical data
+pairs(~Exam_Score + Hours_Studied + Attendance + Sleep_Hours + 
+        Previous_Scores + Tutoring_Sessions + Physical_Activity, 
+      data = trainData, 
+      main = "Scatterplot Matrix")
+```
+
+```{r include=FALSE}
+# List of numerical variables in the study
+NumVars <- c("Hours_Studied","Attendance", "Sleep_Hours", 
+             "Previous_Scores", "Tutoring_Sessions", "Physical_Activity")
+
+# for each numerical variable, fit the model vs. Exam_Score, then tidy the summary for convenient compilation
+
+for (i in 1:length(NumVars)) {
+  model <- lm(paste("Exam_Score ~ ", NumVars[i]), data = trainData)
+  tidy_model <- tidy(model)
+  if (i == 1) {
+    tidy_numVars <- mutate(tidy_model)
+  } else {
+      tidy_numVars <- bind_rows(
+      tidy_numVars,
+      mutate(tidy_model)
+      )
+    }
+}
+```
+
+```{r echo=FALSE, message=FALSE, warning=FALSE}
+# to show the summary statistics
+gt(tidy_numVars |> 
+  mutate(
+    estimate = round(estimate,4),
+    std.error = round(std.error,4),
+    statistic = round(statistic,4),
+    p.value = round(p.value, 4)) |>
+  filter(term != "(Intercept)"))
+```
+
+Based on the scatterplot matrix and the regression models, the following observations between the dependent variable and each predictor can be drawn:
+
+-   Hours_Studied, Attendance, Previous_Scores, Tutoring_Sessions and Physical_Activity have significant linear relationship with Exam_Scores , provided no other predictors are in the model
+
+-   On the other hand, Sleep_Hours have no significant linear relationship with Exam_Scores, when no other predictors are in the model
+
+------------------------------------------------------------------------
+
+## Categorical Variables
+
+Boxplots provide a good visualization of the categorical data. It can indicate where the mean of the data is, where majority of the datapoints are, and outliers in the data.
+
+```{r include=FALSE}
+catVars <- colnames(trainData)[c(3:5,8:9,11:14,16:19)]
+for (var in catVars) {
+  trainData[, var] <- as.factor(trainData[,var])
+}
+```
+
+```{r warning=FALSE, include=FALSE}
+catVarData1 <- trainData |>
+  dplyr::select(catVars[1:6], Exam_Score) |>
+  pivot_longer(cols = catVars[1:6],
+               names_to = "Categories",
+               values_to = "Values")
+
+catVarData2 <- trainData |>
+  dplyr::select(catVars[7:13], Exam_Score) |>
+  pivot_longer(cols = catVars[7:13],
+               names_to = "Categories",
+               values_to = "Values")
+
+```
+
+```{r echo=FALSE}
+ggplot(catVarData1, aes(x = Values, y = Exam_Score)) +
+  geom_boxplot() +
+  facet_wrap(~Categories, scales = "free_x", ncol = 3) + # One boxplot per category
+  theme_minimal() +
+  theme(axis.text.x = element_text(angle = 10)) +
+  labs(x = "Categories", y = "Exam Score", title = "Boxplots by Category")
+```
+
+```{r echo=FALSE}
+ggplot(catVarData2, aes(x = Values, y = Exam_Score)) +
+  geom_boxplot() +
+  facet_wrap(~Categories, scales = "free_x", ncol = 3) + # One boxplot per category
+  theme_minimal() +
+  theme(axis.text.x = element_text(angle = 10)) +
+  labs(x = "Categories", y = "Exam Score", title = "Boxplots by Category")
+```
+
+Based on the plots, we can have the following insights:
+
+-   The mean level of Motivation_Level, School_Type, and Gender variables are the same across classes. The standard error of the distribution also appears similar between classes of these predictors. These plots may mean there is no significant difference in Exam_Scores between classes of these predictors.
+
+-   For the rest of the categorical predictors, there is visible difference in the mean or the standard error between classes.
+
+These will be further tested using Single Linear Regression. Here, each categorical variable will be the single predictor in the regression model. This will only test whether there is significant difference in mean or intercept of the classes of these predictors:
+
+```{r include=FALSE}
+# for each categorical variable, fit the model vs. Exam_Score, then tidy the summary for convenient compilation
+
+for (i in 1:length(catVars)) {
+  model <- lm(paste("Exam_Score ~ ", catVars[i]), data = trainData)
+  tidy_model <- tidy(model)
+  if (i == 1) {
+    tidy_catVars <- mutate(tidy_model
+                           #, model = paste("SFA: ", catVars[i])
+                           )
+  } else {
+      tidy_catVars <- bind_rows(
+      tidy_catVars,
+      mutate(tidy_model
+             #, model = paste("SFA: ", catVars[i])
+             )
+      )
+    }
+}
+```
+
+```{r echo=FALSE, message=FALSE, warning=FALSE}
+# to show the summary statistics
+gt(tidy_catVars |>
+  mutate(
+    estimate = round(estimate,4),
+    std.error = round(std.error,4),
+    statistic = round(statistic,4),
+    p.value = round(p.value, 4)) |>
+  filter(term != "(Intercept)"))
+```
+
+Note: This summary is obtained by fitting a Single Linear Regression model per categorical predictor, but summarized in just 1 table for convenient comparison.
+
+Based on these results, we can infer the following:
+
+-   Access_to_Resources and Distance_from_Home are significant categorical predictors since each dummy variable related to these predictors have low p-values
+
+-   On the other hand, Motivation_Level, Learning_Disabilities, and Gender are not significant predictors since each dummy variable related to these predictors have high p-values
+
+-   The remaining predictors have a dummy variable that has low p-value and another dummy variable with high p-value.
+
+------------------------------------------------------------------------
+
+# Multiple Linear Regression
+
+## Full Model
+
+We will first consider the full model using all predictors.
+
+```{r echo=FALSE}
+lm_Full <- lm(Exam_Score ~ ., data = trainData)
+summary(lm_Full)
+```
+
+### Model Evaluation
+
+The Full model has achieved an $R^2_a$ of `r round(summary(lm_Full)$adj.r.squared,2)`. This means the full model explains almost `r round(summary(lm_Full)$adj.r.squared,2)*100` % of the variability of the response variable.
+
+Based on the p-value of the F-statistic ($<2.2e^{-16}$) , at least one of the predictors has significant linear relationship with exam_score. This can also be seen by the number of variables that have below $5\%$ p-value.
+
+There are also a few predictors with p-value greater than $5\%$, which means these predictors do not have significant linear relationship with exam scores given that the other predictors are already in the model.
+
+Thus, we will perform variable/model selection.
+
+However, before doing so, we will evaluate the MSE of this full model on unseen data (test dataset). This test error will be used as the baseline performance.
+
+```{r include=FALSE}
+pred_lm_Full_train <- fitted(lm_Full)
+mse_lm_Full_train <- mean((pred_lm_Full_train - trainData$Exam_Score)^2)
+```
+
+```{r include=FALSE}
+pred_lm_Full <- predict(lm_Full, newdata=testData)
+mse_lm_Full <- mean((pred_lm_Full-testData$Exam_Score)^2)
+```
+
+The MSE of the full model is `r round(mse_lm_Full,4)`.
+
+```{r include=FALSE}
+model_Comp_Summary <- bind_rows(
+  data.frame(model = "Full Model",
+             adj_R2 = round(summary(lm_Full)$adj.r.squared,4),
+             train_MSE = round(mse_lm_Full_train,4),
+             test_MSE = round(mse_lm_Full,4)
+             )
+)
+gt(model_Comp_Summary)
+```
+
+------------------------------------------------------------------------
+
+## Stepwise - AIC
+
+Instead of modelling all possible combinations of the 19 variables, we will use stepwise selection to identify the best models. We prefer stepwise selection instead backward selection because it is possible for predictors already removed to still be added back if they can improve our evaluation metric. Likewise, it is preferable than forward selection for the similar reason. We will use AIC to select the best model.
+
+The AIC or Akaike Information Criterion minimizes mean squared error while also penalizing complexity of the model. This is defined by the following formula:
+
+$$
+AIC = n \ ln\left(\frac{SSE}{n}\right) + 2p
+$$
+
+where $SSE$ is the sum of squared error of the model, $n$ is the number of observations in the training data, and $p$ is the number of predictors in the model.
+
+```{r include=FALSE}
+lm_stepwise_AIC <- step(lm_Full, direction = "both", 
+                        k= 2, trace = 0)
+```
+
+```{r include=FALSE}
+tidy_Full <- tidy(lm_Full)
+tidy_sw_AIC <- tidy(lm_stepwise_AIC)
+
+tidy_All <- bind_rows(
+  mutate(tidy_Full, model = "Full Model"),
+  mutate(tidy_sw_AIC, model = "Stepwise - AIC")
+)
+```
+
+```{r echo=FALSE, message=FALSE, warning=FALSE}
+gt(tidy_All |> 
+  dplyr::select(term, estimate, model) |> 
+  pivot_wider(names_from = model, values_from = estimate))
+```
+
+-   Of the 27 predictors in the Full model, 3 were removed by the criterion: Sleep_Hours, School_TypePublic, and Gender_Male.
+
+### Model Comparison
+
+We will compare the full model with the model from stepwise selection using AIC.
+
+```{r echo=FALSE}
+anova(lm_stepwise_AIC,lm_Full)
+```
+
+-   Using the Analysis of Variance (Anova), we will compare the full model and reduced model under the main hypothesis that the coefficients of predictors removed from the full model are equal to 0. Since the p-value from the F-test is high, we fail to reject $H_0$ which means the reduced model is enough to predict Exam_Scores..
+
+-   We prefer the model from stepwise selection using AIC.
+
+### Model Evaluation
+
+```{r echo=FALSE}
+summary(lm_stepwise_AIC)
+```
+
+The model from stepwise selection using AIC has achieved an $R^2_a$ of `r round(summary(lm_stepwise_AIC)$adj.r.squared,2)`. This means the full model explains almost `r round(summary(lm_stepwise_AIC)$adj.r.squared,2)*100` % of the variability of the response variable.
+
+Based on the p-value of the F-statistic ($<2.2e^{-16}$) , at least one of the predictors has significant linear relationship with exam_score. This can also be seen by the number of variables that have below $5\%$ p-value. Only 4 predictors have p-values greater than $5\%$ but all of these have at most $10\%$ p-value.
+
+```{r include=FALSE}
+pred_lm_stepwise_AIC_train <- fitted(lm_stepwise_AIC)
+mse_lm_stepwise_AIC_train <- mean((pred_lm_stepwise_AIC_train - trainData$Exam_Score)^2)
+```
+
+```{r include=FALSE}
+pred_lm_stepwise_AIC <- predict(lm_stepwise_AIC, newdata=testData) 
+mse_lm_stepwise_AIC <- mean((pred_lm_stepwise_AIC-testData$Exam_Score)^2)
+```
+
+The MSE of the reduced model (AIC) is `r round(mse_lm_stepwise_AIC,4)`.
+
+```{r echo=FALSE, message=FALSE, warning=FALSE}
+model_Comp_Summary <- bind_rows(
+  model_Comp_Summary,
+  data.frame(model = "Stepwise - AIC",
+             adj_R2 = round(summary(lm_stepwise_AIC)$adj.r.squared,4),
+             train_MSE = round(mse_lm_stepwise_AIC_train, 4),
+             test_MSE = round(mse_lm_stepwise_AIC,4)
+             )
+)
+gt(model_Comp_Summary)
+```
+
+The model from stepwise selection achieved higher $R_a^2$ but slightly higher test MSE. Overall, the difference between the Full model and Stepwise - AIC model is not significant, as supported by anova.
+
+### Model Diagnostics
+
+We will check presence of collinearity in the model.
+
+```{r echo=FALSE, message=FALSE, warning=FALSE}
+flextable(tidy(vif(lm_stepwise_AIC)) |> summarise(maxVIF = max(x)))
+```
+
+-   Since the maximum VIF among all predictors in the model is only 2.61, there is no significant collinearity in the model.
+
+Let's check if the linearity, equal variance, and normality assumptions hold for the Stepwise - AIC model.
+
+```{r include=FALSE}
+custom_Plots <- function(lm_object, title){
+  par(mfrow=c(1,2))
+  
+  # Residual Plot
+  plot(fitted(lm_object), resid(lm_object), col = "grey", pch = 20,
+       xlab = "Fitted", ylab = "Residuals", main = "Residual plot")
+  abline(h = 0, col = "darkorange", lwd = 2)
+  
+  # Normal Q-Q Plot
+  qqnorm(resid(lm_object))  
+  qqline(resid(lm_object), col = "dodgerblue", lwd = 2)
+  
+  mtext(title, side = 3, 
+        line = -1, outer = TRUE, cex = 1.25)
+}
+```
+
+```{r echo=FALSE}
+custom_Plots(lm_stepwise_AIC, "Stepwise Selection - AIC")
+```
+
+-   The mean of the residuals seem to be $0$ but there are a few data points with very high residual values.
+
+-   The outer regions in the graph have smaller spread than the spread of residuals in the middle.
+
+-   Majority of the data points seem to lie in the theoretical quantile of the Normal distribution, but this still needs to be verified.
+
+```{r echo=FALSE}
+# Test Equal Variance
+bptest(lm_stepwise_AIC)
+```
+
+-   From the results of the BP test, the p-value is $0.6755$ which is higher than $\alpha = 0.05$. Thus, we fail to reject $H_0$ that the variance of the residuals is constant.
+
+```{r echo=FALSE}
+# Test Normality
+shapiro.test(resid(lm_stepwise_AIC))
+```
+
+-   From the Shapiro-Wilk test, since the p-value is $<2.2e^{-16}$, at $\alpha=0.05$, we reject $H_0$ that the residuals are from the $Normal$ distribution.
+
+We will explore the presence of influential points:
+
+```{r echo=FALSE}
+# Cook's distance
+cooksDist_AIC <- cooks.distance(lm_stepwise_AIC)
+
+infPoint_i_AIC <- which(cooksDist_AIC > (4 / length(cooksDist_AIC)))
+infPoint_i_AIC
+```
+
+-   There are 3 influential points in the dataset based on cook's distance
+
+```{r echo=FALSE}
+# checking outliers
+rStandard_AIC <- rstandard(lm_stepwise_AIC) #standardized residuals
+
+out_i_AIC <- which(abs(rStandard_AIC) > 2)
+out_IP_AIC <- infPoint_i_AIC[which(infPoint_i_AIC %in% out_i_AIC)]
+trainData[infPoint_i_AIC,c(1:3,20)]
+```
+
+-   All influential points are also considered outliers
+
+------------------------------------------------------------------------
+
+## Stepwise - AIC with no Influential Points
+
+While we do not have sufficient background regarding the data collection process, we will still explore the impact of these influential points. These points will be removed, then we will refit the Stepwise - AIC model, evaluate, and perform model diagnostics.
+
+```{r echo=FALSE}
+trainData_AIC_noInf <- trainData[-infPoint_i_AIC,]
+
+lm_stepwise_AIC_noInf <- lm(formula(lm_stepwise_AIC), data = trainData_AIC_noInf)
+summary(lm_stepwise_AIC_noInf)
+```
+
+```{r include=FALSE}
+tidy_sw_AIC_noInf <- tidy(lm_stepwise_AIC_noInf)
+
+tidy_All <- bind_rows(
+  tidy_All,
+  mutate(tidy_sw_AIC_noInf, model = "Stepwise - AIC - noInf")
+)
+```
+
+```{r echo=FALSE}
+gt(tidy_All |> 
+  dplyr::select(term, estimate, model) |> 
+  pivot_wider(names_from = model, values_from = estimate))
+```
+
+### Model Evaluation
+
+The model from stepwise selection using AIC applied on the data without influential points has achieved an $R^2_a$ of `r summary(lm_stepwise_AIC_noInf)$adj.r.squared`. This means the full model explains almost `r round(summary(lm_stepwise_AIC_noInf)$adj.r.squared,2)` % of the variability of the response variable.
+
+Based on the p-value of the F-statistic ($<2.2e^{-16}$) , at least one of the predictors has significant linear relationship with exam_score. All predictors have below $5\%$ p-value.
+
+```{r include=FALSE}
+pred_lm_stepwise_AIC_noInf_train <- fitted(lm_stepwise_AIC_noInf)
+mse_lm_stepwise_AIC_noInf_train <- mean((pred_lm_stepwise_AIC_noInf_train - trainData_AIC_noInf$Exam_Score)^2)
+```
+
+```{r include=FALSE}
+pred_lm_stepwise_AIC_noInf <- predict(lm_stepwise_AIC_noInf, newdata=testData)
+mse_lm_stepwise_AIC_noInf <- mean((pred_lm_stepwise_AIC_noInf-testData$Exam_Score)^2)
+```
+
+The MSE of the reduced model (AIC) with no Influential points is `r round(mse_lm_stepwise_AIC_noInf,4)`.
+
+```{r echo=FALSE}
+model_Comp_Summary <- bind_rows(
+  model_Comp_Summary,
+  data.frame(model = "Stepwise - AIC - noInf",
+             adj_R2 = round(summary(lm_stepwise_AIC_noInf)$adj.r.squared,4),
+             train_MSE = round(mse_lm_stepwise_AIC_noInf_train, 4),
+             test_MSE = round(mse_lm_stepwise_AIC_noInf,4)))
+gt(model_Comp_Summary)
+```
+
+The model from stepwise selection without influential points achieved significantly higher $R_a^2$ and lower train MSE. However, the decrease in MSE may be attributed to the removal of influential points. Further, while it is expected for test MSE to be greater than train MSE, the difference between the two suggest there may be overfitting in the model.
+
+### Model Diagnostics
+
+We will check presence of collinearity in the model.
+
+```{r echo=FALSE, warning=FALSE}
+flextable(tidy(vif(lm_stepwise_AIC_noInf)) |> summarise(maxVIF = max(x)))
+```
+
+-   Since the maximum VIF among all predictors in the model is only 2.60, there is no significant collinearity in the model.
+
+Let's check if the linearity, equal variance, and normality assumptions hold for the Stepwise - AIC model without the influential points.
+
+```{r echo=FALSE}
+custom_Plots(lm_stepwise_AIC_noInf, "Stepwise Selection - AIC (no Influential Points)")
+```
+
+-   After removal of influential points, the mean of the residuals seem to be 0 at any region of the residual plot. Linearity seems to hold,
+
+-   The spread of the data points look constant throughout the residual plot.
+
+-   However, when influential points were removed, it is more observable that the empirical distribution of residuals do not follow the normal distribution.
+
+```{r echo=FALSE}
+# Test Equal Variance
+bptest(lm_stepwise_AIC_noInf)
+```
+
+```{r echo=FALSE}
+# Test Normality
+shapiro.test(resid(lm_stepwise_AIC_noInf))
+```
+
+-   Based on BP test, the equal variance assumption holds.
+
+-   Based on Shapiro-Wilk test, the Normality assumption does not hold.
+
+The influential points were removed to better see the model diagnostics of the current best model. It turns out, the normality assumption does not hold since the empirical distribution of the data does not follow the quantile plot of normal distribution. We will do response transformation using box-cox using the entire data (including influential points).
+
+------------------------------------------------------------------------
+
+## Stepwise - AIC with Box-Cox Transformation
+
+### Response Transformation - Box Cox
+
+Since the spread of the residuals appear the same throughout the residual plot, and was also confirmed by the BP test, we will not use the variance stabilizing transformation methodologies. Instead, the Box-Cox transformation will be used as this often resolves the normality assumption.
+
+We will still consider the entire training data in this response transformation, since the influential points identified in the previous model are specific to the model only.
+
+```{r echo=FALSE}
+boxcox(lm_stepwise_AIC,lambda = seq(-6, -3, by = 0.5))
+```
+
+```{r}
+lambda_boxcox = -4.5
+```
+
+```{r include=FALSE}
+sw_AIC_predictors <- paste(all.vars(formula(lm_stepwise_AIC))[-1], 
+                           collapse = " + ")
+sw_AIC_response <- all.vars(formula(lm_stepwise_AIC))[1]
+sw_AIC_boxcox_formula <- paste("(((",sw_AIC_response,"^(lambda_boxcox))-1)/
+                               lambda_boxcox) ~ ", sw_AIC_predictors)
+```
+
+```{r echo=FALSE}
+lm_stepwise_AIC_boxcox <- lm(sw_AIC_boxcox_formula, data = trainData)
+summary(lm_stepwise_AIC_boxcox)
+```
+
+```{r echo=FALSE}
+custom_Plots(lm_stepwise_AIC_boxcox, "Stepwise Selection - AIC - Box-Cox transformation")
+```
+
+```{r}
+# Test Equal Variance
+bptest(lm_stepwise_AIC_boxcox)
+```
+
+```{r}
+# Test Normality
+shapiro.test(resid(lm_stepwise_AIC_boxcox))
+```
+
+After box-cox transformation, the results show that the linearity assumption does not hold anymore. Further, it did not solve the normality assumption.
+
+In the box-cox transformation formula, the lambda value of -4.5 is will cause the y values to shrink significantly. In the model summary, it is observable that the coefficients of the predictors became significantly small (at least $10^{-10}$) and predictions are mainly driven by the intercept only. When further examined, a y value of 60 will be transformed to 0.222222 while a value of 100 will be transformed to 0.222222 as well. Since the range of values of y in the original data is only from 60 to 100, the transformed values have no variance anymore. This explains the bad model diagnostics.
+
+The best model is still the model prior to box-cox transformation when influential points were removed.
+
+Note that the $R^2$ and $R_a^2$ of this model is $0.9901$ and $0.9905$, respectively. These suggest that the current model explains almost the entire variability of the response variable. This may also mean the model is overfitting the data since only $1\%$ is not explained by the model, given the many predictors in the data.
+
+In the anova between AIC and BIC above, the p-value of the f-test is small, which suggests the full model is better than the reduced model. But because the model assumptions were violated, and the box-cox transformation did not resolve this assumption, we will explore the backward selection model using BIC.
+
+------------------------------------------------------------------------
+
+## Stepwise - BIC
+
+The BIC or Bayesian Information Criterion minimizes mean squared error while also penalizing complexity of the model. This is defined by the following formula:
+
+$$ BIC = n \ ln\left(\frac{SSE}{n}\right) + ln(n)p $$
+
+where $SSE$ is the sum of squared error of the model, $n$ is the number of observations in the training data, and $p$ is the number of predictors in the model.
+
+Again, we will use stepwise selection using the entire dataset since the influential points identified in the previous models are specific to the model.
+
+```{r echo=FALSE}
+lm_stepwise_BIC <- step(lm_Full, direction = "both", 
+                        k= log(nrow(trainData)), trace = 0)
+```
+
+```{r echo=FALSE}
+tidy_sw_BIC <- tidy(lm_stepwise_BIC)
+
+tidy_All <- bind_rows(
+  tidy_All,
+  mutate(tidy_sw_BIC, model = "Stepwise - BIC")
+)
+```
+
+```{r echo=FALSE}
+gt(tidy_All |> 
+  dplyr::select(term, estimate, model) |> 
+  pivot_wider(names_from = model, values_from = estimate))
+```
+
+-   Of the 27 predictors in the Full model, 3 were removed by AIC: Sleep_Hours, School_TypePublic, and Gender_Male. 4 predictors were further removed by BIC: 2 dummy variables related to Teacher_Quality and 2 dummy variables related to Peer_Influence.
+
+### Model Comparison
+
+We will compare the model from stepwise selection using AIC with the model from stepwise selection using BIC.
+
+```{r echo=FALSE}
+anova(lm_stepwise_BIC,lm_stepwise_AIC)
+```
+
+-   Using the Analysis of Variance (Anova), we will compare the full model (model from AIC) and reduced model (model from BIC) under the main hypothesis that the coefficients of predictors removed from the full model are equal to 0.
+
+-   Since the p-value from the F-test is less than $5\%$, we reject $H_0$. This means that there are predictors in the full model that were removed in the reduced mode that has significant linear relationship with Exam_Score. We still prefer the model from stepwise selection using AIC.
+
+-   Despite this result, the BIC model will be examined further as the model diagnostics from the model using AIC violated the normality assumption, which was not resolved by box-cox transformation.
+
+### Model Evaluation
+
+```{r echo=FALSE}
+summary(lm_stepwise_BIC)
+```
+
+The model from stepwise selection using BIC has achieved an $R^2_a$ of `r round(summary(lm_stepwise_BIC)$adj.r.squared,2)`. This means the full model explains almost `r round(summary(lm_stepwise_BIC)$adj.r.squared,2)*100` % of the variability of the response variable.
+
+Based on the p-value of the F-statistic ($<2.2e^{-16}$) , at least one of the predictors has significant linear relationship with exam_score. This can also be seen by the number of variables that have below $5\%$ p-value. Only 2 predictors have p-values greater than $5\%$, one of which has at most $10\%$ p-value, and the other one at $10.6\%$.
+
+```{r include=FALSE}
+pred_lm_stepwise_BIC_train <- fitted(lm_stepwise_BIC)
+mse_lm_stepwise_BIC_train <- mean((pred_lm_stepwise_BIC_train - trainData$Exam_Score)^2)
+```
+
+```{r include=FALSE}
+pred_lm_stepwise_BIC <- predict(lm_stepwise_BIC, newdata=testData)
+mse_lm_stepwise_BIC <- mean((pred_lm_stepwise_BIC-testData$Exam_Score)^2)
+```
+
+The MSE of the full model is `r round(mse_lm_stepwise_BIC,4)`.
+
+```{r echo=FALSE}
+model_Comp_Summary <- bind_rows(
+  model_Comp_Summary,
+  data.frame(model = "Stepwise - BIC",
+             adj_R2 = round(summary(lm_stepwise_BIC)$adj.r.squared,4),
+             train_MSE = round(mse_lm_stepwise_BIC_train, 4),
+             test_MSE = round(mse_lm_stepwise_BIC,4)) )
+gt(model_Comp_Summary)
+```
+
+The model from stepwise selection achieved lower $R_a^2$ and slightly higher test MSE. As also shown by Anova, the model from AIC is still preferred as the predictors that were removed by BIC seem to have significant linear relationship with Exam_Score.
+
+### Model DIagnostics
+
+We will check presence of collinearity in the model.
+
+```{r echo=FALSE, warning=FALSE}
+flextable(tidy(vif(lm_stepwise_BIC)) |> summarise(maxVIF = max(x)))
+```
+
+-   Since the maximum VIF among all predictors in the model is only 2.60, there is no significant collinearity in the model.
+
+```{r echo=FALSE}
+custom_Plots(lm_stepwise_BIC, "Stepwise Selection - BIC")
+```
+
+-   The mean of the residuals seem to be $0$ but there are a few data points with very high residual values.
+
+-   The outer regions in the graph have smaller spread than the spread of residuals in the middle.
+
+-   Majority of the data points seem to lie in the theoretical quantile of the Normal distribution, but this still needs to be verified.
+
+```{r echo=FALSE}
+# Test Equal Variance
+bptest(lm_stepwise_BIC)
+```
+
+-   From the results of the BP test, the p-value is $0.6426$ which is higher than $\alpha = 0.05$. Thus, we fail to reject $H_0$ that the variance of the residuals is constant
+
+```{r echo=FALSE}
+# Test Normality
+shapiro.test(resid(lm_stepwise_BIC))
+```
+
+-   From the Shapiro-Wilk test, since the p-value is $<2.2e^{-16}$, at $\alpha=0.05$, we reject $H_0$ that the residuals are from the $Normal$ distribution.
+
+We will explore the presence of influential points:
+
+```{r echo=FALSE}
+# Cook's distance
+cooksDist_BIC <- cooks.distance(lm_stepwise_BIC)
+
+infPoint_i_BIC <- which(cooksDist_BIC > (4 / length(cooksDist_BIC)))
+infPoint_i_BIC
+```
+
+-   There are 3 influential points in the dataset
+
+```{r echo=FALSE}
+# checking outliers
+rStandard_BIC <- rstandard(lm_stepwise_BIC) #standardized residuals
+
+out_i_BIC <- which(abs(rStandard_BIC) > 2)
+out_IP_BIC <- infPoint_i_BIC[which(infPoint_i_BIC %in% out_i_BIC)]
+gt(trainData[out_IP_BIC,c(1:3,20)])
+```
+
+-   All influential points are also considered outliers
+
+------------------------------------------------------------------------
+
+## Stepwise - BIC with no Influential Points
+
+Same as in AIC, while we do not have sufficient background regarding the data collection process, we will still explore the impact of these influential points. These points will be removed, then we will refit the Stepwise - BIC model, evaluate, and perform model diagnostics.
+
+```{r echo=FALSE}
+trainData_BIC_noInf <- trainData[-infPoint_i_BIC,]
+
+lm_stepwise_BIC_noInf <- lm(formula(lm_stepwise_BIC), data = trainData_BIC_noInf)
+summary(lm_stepwise_BIC_noInf)
+```
+
+```{r echo=FALSE}
+tidy_sw_BIC_noInf <- tidy(lm_stepwise_BIC_noInf)
+
+tidy_All <- bind_rows(
+  tidy_All,
+  mutate(tidy_sw_BIC_noInf, model = "Stepwise - BIC - noInf")
+)
+```
+
+```{r}
+gt(tidy_All |> 
+  dplyr::select(term, estimate, model) |> 
+  pivot_wider(names_from = model, values_from = estimate))
+```
+
+### Model Evaluation
+
+The model from stepwise selection using BIC applied on the data without influential points has achieved an $R^2_a$ of `r round(summary(lm_stepwise_BIC_noInf)$adj.r.squared,2)`. This means the full model explains almost `r round(summary(lm_stepwise_BIC_noInf)$adj.r.squared,2)*100` % of the variability of the response variable.
+
+Based on the p-value of the F-statistic ($<2.2e^{-16}$) , at least one of the predictors has significant linear relationship with exam_score. All predictors have below $5\%$ p-value.
+
+```{r include=FALSE}
+pred_lm_stepwise_BIC_noInf_train <- fitted(lm_stepwise_BIC_noInf)
+mse_lm_stepwise_BIC_noInf_train <- mean((pred_lm_stepwise_BIC_noInf_train - trainData_BIC_noInf$Exam_Score)^2)
+```
+
+```{r include=FALSE}
+pred_lm_stepwise_BIC_noInf <- predict(lm_stepwise_BIC_noInf, newdata=testData)
+mse_lm_stepwise_BIC_noInf <- mean((pred_lm_stepwise_BIC_noInf-testData$Exam_Score)^2)
+```
+
+The MSE of the full model is `r round(mse_lm_stepwise_BIC_noInf,4)`.
+
+```{r echo=FALSE}
+model_Comp_Summary <- bind_rows(
+  model_Comp_Summary,
+  data.frame(model = "Stepwise - BIC - noInf",
+             adj_R2 = round(summary(lm_stepwise_BIC_noInf)$adj.r.squared,4),
+             train_MSE = round(mse_lm_stepwise_BIC_noInf_train, 4),
+             test_MSE = round(mse_lm_stepwise_BIC_train,4)))
+gt(model_Comp_Summary)
+```
+
+The model from stepwise selection without influential points achieved significantly higher $R_a^2$ but slightly and lower MSE. However, the decrease in MSE may be attributed to the removal of influential points. Further, while it is expected for test MSE to be greater than train MSE, the difference between the two suggest there may be overfitting in the model.
+
+### Model Diagnostics
+
+We will check presence of collinearity in the model.
+
+```{r warning=FALSE}
+flextable(tidy(vif(lm_stepwise_BIC_noInf)) |> summarise(maxVIF = max(x)))
+```
+
+-   Since the maximum VIF among all predictors in the model is only 2.60, there is no significant collinearity in the model.
+
+Let's check if the linearity, equal variance, and normality assumptions hold for the Stepwise - BIC model without the influential points.
+
+```{r echo=FALSE}
+custom_Plots(lm_stepwise_BIC_noInf, "Stepwise Selection - BIC (no Influential Points)")
+```
+
+-   After removal of influential points, the mean of the residuals seem to be 0 at any region of the residual plot. Linearity seems to hold,
+
+-   The spread of the data points look constant throughout the residual plot.
+
+-   When influential points were removed, it is more observable that the empirical distribution of residuals is close to the normal distribution.
+
+```{r echo=FALSE}
+# Test Equal Variance 
+bptest(lm_stepwise_BIC_noInf)
+```
+
+```{r echo=FALSE}
+# Test Normality
+shapiro.test(resid(lm_stepwise_BIC_noInf))
+```
+
+-   Based on BP test, the equal variance assumption holds.
+
+-   Based on Shapiro-Wilk test, the Normality assumption already holds.
+
+The influential points were removed to better see the model diagnostics of the current best model. It turns out, the linearity, equal variance and normality assumption already hold.
+
+### Test Results
+
+Since the linearity, equal variance, and normality assumptions hold, this model will be further evaluated if it can generalize well on new data.
+
+In the model evaluation summary above, we obtained the following results:
+
+```{r echo=FALSE, message=FALSE, warning=FALSE}
+gt(model_Comp_Summary)
+```
+
+Without the influential points, the model achieved $R_a^2$ of `r summary(lm_stepwise_BIC_noInf)$adj.r.squared` . This is lower than the $R_a^2$ obtained using AIC without the influential points. However, the difference between the train and test MSE is still significant. This shows the model may be overfitting the training data and cannot generalize well to unseen data.
+
+Since we have already explored feature selection, we will now explore the shrinkage methods
+
+------------------------------------------------------------------------
+
+## Ridge Regression
+
+We will penalized multiple linear regression to the model that we obtained from BIC, since this model is the best model we obtained so far with good model diagnostics.
+
+```{r}
+X_train <- model.matrix(formula(lm_stepwise_BIC),trainData)[, -1]
+y_train <- trainData$Exam_Score
+
+X_test <- model.matrix(formula(lm_stepwise_BIC),testData)[, -1]
+y_test <- testData$Exam_Score
+```
+
+Plot below shows the MSE for different values of lambda, selected by glmnet cross-validation:
+
+```{r echo=FALSE}
+# To find the best lambda, use the cv.glmnet function (10 folds cv by default). 
+lm_BIC_Ridgecv = cv.glmnet(X_train, y_train, alpha = 0)
+
+# The plot illustrates the MSE for the lambda considered. 
+plot(lm_BIC_Ridgecv)
+```
+
+```{r echo=FALSE}
+bestlam_Ridge = lm_BIC_Ridgecv$lambda.min
+
+```
+
+The best lambda for ridge regression is `r round(bestlam_Ridge,4)` .
+
+```{r echo=FALSE}
+lm_BIC_Ridge_BestLam = glmnet(X_train, y_train, alpha = 0, lambda = bestlam_Ridge)
+```
+
+```{r echo=FALSE}
+tidy_Ridge_BestLam <- tidy(lm_BIC_Ridge_BestLam)
+
+tidy_All <- bind_rows(
+  tidy_All,
+  mutate(tidy_Ridge_BestLam, model = "BIC - Ridge")
+)
+```
+
+```{r echo=FALSE}
+gt(tidy_All |> 
+  dplyr::select(term, estimate, model) |> 
+  pivot_wider(names_from = model, values_from = estimate))
+```
+
+### Model Evaluation
+
+Since the glmnet package has different implementation from lm, the $R_a^2$, $RSS$ and $TSS$ will be computed manually.
+
+```{r echo=FALSE}
+pred_lm_Ridge_train <- predict(lm_BIC_Ridge_BestLam, newx = X_train)
+mse_lm_Ridge_train <- mean((pred_lm_Ridge_train - y_train)^2)
+```
+
+```{r echo=FALSE}
+# predict Y for the test data
+pred_lm_Ridge = predict(lm_BIC_Ridge_BestLam, newx = X_test)
+mse_lm_Ridge = mean((pred_lm_Ridge - y_test)^2)
+```
+
+```{r echo=FALSE}
+# Calculate RSS and TSS
+RSS_Ridge <- sum((pred_lm_Ridge_train - y_train)^2)
+TSS_Ridge <- sum((pred_lm_Ridge - mean(y_train))^2)
+
+# Number of observations and predictors
+n <- nrow(X_train)
+p <- sum(coef(lm_BIC_Ridge_BestLam)[-1] != 0)
+
+# Calculate Adjusted R-squared
+adjR2_Ridge <- 1 - (RSS_Ridge / (n - p - 1)) / (TSS_Ridge / (n - 1))
+```
+
+```{r echo=FALSE}
+model_Comp_Summary <- bind_rows(
+  model_Comp_Summary,
+  data.frame(model = "BIC - Ridge",
+             adj_R2 = round(adjR2_Ridge,4),
+             train_MSE = round(mse_lm_Ridge_train, 4),
+             test_MSE = round(mse_lm_Ridge,4)))
+gt(model_Comp_Summary)
+```
+
+There is a significant decrease in $R_a^2$ when the ridge penalty is applied to the model from BIC. Train and test MSE also worsened but still close to model without penalty. The MSE of the Ridge model is `r round(mse_lm_Ridge,4)`.
+
+### Model Diagnostics
+
+There is no collinearity between the predictors, as already seen in the model diagnostics of the stepwise selection model using BIC.
+
+```{r echo=FALSE}
+custom_Plots_Penalized <- function(lm_object, X_dataset, y_dataset, title){
+  par(mfrow=c(1,2))
+  
+  # Residual Plot
+  plot(predict(lm_object, newx = X_dataset),
+       y_dataset - predict(lm_object, newx = X_dataset), 
+       col = "grey", pch = 20,
+       xlab = "Fitted", ylab = "Residuals", main = "Residual plot")
+  abline(h = 0, col = "darkorange", lwd = 2)
+  
+  # Normal Q-Q Plot
+  qqnorm(y_dataset - predict(lm_object, newx = X_dataset))  
+  qqline(y_dataset - predict(lm_object, newx = X_dataset), 
+         col = "dodgerblue", lwd = 2)
+  
+  mtext(title, side = 3, 
+        line = -1, outer = TRUE, cex = 1.25)
+}
+```
+
+Let's check if the linearity, equal variance, and normality assumptions hold for the penalized Stepwise - BIC model.
+
+```{r echo=FALSE}
+custom_Plots_Penalized(lm_BIC_Ridge_BestLam, X_train, y_train, 
+                       "BIC - Ridge Regression")
+```
+
+-   The mean of the residuals seem to be $0$ but there are a few data points with very high residual values.
+
+-   The outer regions in the graph have smaller spread than the spread of residuals in the middle.
+
+-   Majority of the data points seem to lie in the theoretical quantile of the Normal distribution, but this still needs to be verified.
+
+```{r echo=FALSE}
+# Test Equal Variance
+Ridge_Residuals <- y_train - predict(lm_BIC_Ridge_BestLam, newx = X_train)
+bptest(lm(Ridge_Residuals ~. , data=as.data.frame(X_train)))
+```
+
+```{r echo=FALSE}
+# Test Normality
+shapiro.test(Ridge_Residuals)
+```
+
+-   From the results of the BP test, the p-value is $0.6426$ which is higher than $\alpha = 0.05$. Thus, we fail to reject $H_0$ that the variance of the residuals is constant
+
+-   Based on Shapiro-Wilk test, however, the Normality assumption does not hold.
+
+-   From the Shapiro-Wilk test, since the p-value is $<2.2e^{-16}$, at $\alpha=0.05$, we reject $H_0$ that the residuals are from the $Normal$ distribution.
+
+------------------------------------------------------------------------
+
+## Ridge Regression with no Influential Points
+
+We will penalize the model that we obtained from BIC using Ridge penalty, since this model is the best model we obtained so far with good model diagnostics, but we will remove influential points too.
+
+```{r}
+X_train <- model.matrix(formula(lm_stepwise_BIC),trainData_BIC_noInf)[, -1]
+y_train <- trainData_BIC_noInf$Exam_Score
+
+X_test <- model.matrix(formula(lm_stepwise_BIC),testData)[, -1]
+y_test <- testData$Exam_Score
+```
+
+Plot below shows the MSE for different values of lambda, selected by glmnet cross-validation:
+
+```{r echo=FALSE}
+# To find the best lambda, use the cv.glmnet function (10 folds cv by default). 
+lm_BIC_Ridgecv = cv.glmnet(X_train, y_train, alpha = 0)
+
+# The plot illustrates the MSE for the lambda considered. 
+plot(lm_BIC_Ridgecv)
+```
+
+```{r}
+bestlam_Ridge = lm_BIC_Ridgecv$lambda.min
+```
+
+The best lambda for ridge regression is `r round(bestlam_Ridge,4)` .
+
+```{r echo=FALSE}
+lm_BIC_Ridge_BestLam = glmnet(X_train, y_train, alpha = 0, lambda = bestlam_Ridge)
+```
+
+```{r echo=FALSE}
+tidy_Ridge_BestLam <- tidy(lm_BIC_Ridge_BestLam)
+
+tidy_All <- bind_rows(
+  tidy_All,
+  mutate(tidy_Ridge_BestLam, model = "BIC - Ridge - noInf")
+)
+```
+
+```{r}
+gt(tidy_All |> 
+  dplyr::select(term, estimate, model) |> 
+  pivot_wider(names_from = model, values_from = estimate))
+```
+
+### Model Evaluation
+
+Since the glmnet package has different implementation from lm, the $R_a^2$, $RSS$ and $TSS$ will be computed manually.
+
+```{r echo=FALSE}
+pred_lm_Ridge_train <- predict(lm_BIC_Ridge_BestLam, newx = X_train)
+mse_lm_Ridge_train <- mean((pred_lm_Ridge_train - y_train)^2)
+```
+
+```{r echo=FALSE}
+# predict Y for the test data
+pred_lm_Ridge = predict(lm_BIC_Ridge_BestLam, newx = X_test)
+mse_lm_Ridge = mean((pred_lm_Ridge - y_test)^2)
+```
+
+The MSE of the Ridge model is `r mse_lm_Ridge`.
+
+```{r echo=FALSE}
+# Calculate RSS and TSS
+RSS_Ridge <- sum((pred_lm_Ridge_train - y_train)^2)
+TSS_Ridge <- sum((pred_lm_Ridge - mean(y_train))^2)
+
+# Number of observations and predictors
+n <- nrow(X_train)
+p <- sum(coef(lm_BIC_Ridge_BestLam)[-1] != 0)
+
+# Calculate Adjusted R-squared
+adjR2_Ridge <- 1 - (RSS_Ridge / (n - p - 1)) / (TSS_Ridge / (n - 1))
+```
+
+```{r echo=FALSE}
+model_Comp_Summary <- bind_rows(
+  model_Comp_Summary,
+  data.frame(model = "BIC - Ridge - noInf",
+             adj_R2 = round(adjR2_Ridge,4),
+             train_MSE = round(mse_lm_Ridge_train, 4),
+             test_MSE = round(mse_lm_Ridge,4)))
+gt(model_Comp_Summary)
+```
+
+The penalized model from stepwise selection using BIC, without influential points, achieved lower $R_a^2$ than the current best model. However, test MSE increased from $3.58$ to $5.23$.
+
+### Model Diagnostics
+
+There is no collinearity between the predictors, as already seen in the model diagnostics of the stepwise selection model using BIC.
+
+Let's check if the linearity, equal variance, and normality assumptions hold for the penalized Stepwise - BIC model.
+
+```{r echo=FALSE}
+custom_Plots_Penalized(lm_BIC_Ridge_BestLam, X_train, y_train,
+                       "BIC - Ridge Regression (no Influential Points)")
+```
+
+-   After removal of influential points, the mean of the residuals seem to be 0 at any region of the residual plot. Linearity seems to hold,
+
+-   The spread of the data points look constant throughout the residual plot.
+
+-   When influential points were removed, it is more observable that the empirical distribution of residuals is close to the normal distribution.
+
+```{r echo=FALSE}
+# Test Equal Variance
+Ridge_Residuals <- y_train - predict(lm_BIC_Ridge_BestLam, newx = X_train)
+bptest(lm(Ridge_Residuals ~. , data=as.data.frame(X_train)))
+```
+
+```{r echo=FALSE}
+# Test Normality
+shapiro.test(Ridge_Residuals)
+```
+
+-   Based on BP test, the equal variance assumption holds.
+
+-   Based on Shapiro-Wilk test, the Normality assumption already holds.
+
+The influential points were removed to better see the model diagnostics of the current best model. It turns out, the linearity, equal variance and normality assumption still hold on the penalized model.
+
+### Test Results
+
+In the model evaluation summary above, we obtained the following results:
+
+```{r echo=FALSE, message=FALSE, warning=FALSE, paged.print=FALSE}
+gt(model_Comp_Summary)
+```
+
+Without the influential points, the penalized model achieved $R_a^2$ of $0.9637$. This is lower than the $R_a^2$ obtained from stepwise selection using BIC, without the influential points. However, since the test MSE worsened when penalty was applied, the model without penalty is preferred.
+
+------------------------------------------------------------------------
+
+# Inference
+
+Given the sampling distribution of the coefficients, the following are the bounds of the confidence interval for each coefficient at $95\%$ confidence level.
+
+```{r echo=FALSE}
+n <- nrow(trainData_BIC_noInf)
+p <- sum(coef(lm_stepwise_BIC_noInf)[-1] != 0)
+
+tidy_sw_BIC_noInf <- tidy_sw_BIC_noInf |>
+  mutate(CI_lower = estimate - qt(0.975,n-p)* std.error,
+         CI_upper = estimate + qt(0.975,n-p)* std.error)
+
+gt(tidy_sw_BIC_noInf |>
+     dplyr::select(-std.error, -statistic))
+```
